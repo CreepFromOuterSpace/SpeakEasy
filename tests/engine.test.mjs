@@ -16,3 +16,15 @@ test('alignment handles punctuation, case, substitutions, omissions and insertio
  assert.equal(compareText("She’s here.","shes HERE").wordErrorRate,0);
 });
 test('empty transcript flags all reference words and rendered text is escaped',()=>{assert.equal(compareText('six small birds','').omissions,3);assert.equal(escapeHTML('<img>'), '&lt;img&gt;');});
+import { readingReport, drillPrompt } from '../src/engine.js';
+test('reading report derives score and practice focuses from actual observations',()=>{
+ const cmp=compareText('The silver birds sing today.', 'The little birds um sing');
+ const r=readingReport(cmp,{pauses:2,quiet:true},'The little birds um sing');
+ assert.equal(r.score,40);assert.deepEqual(r.issues.map(x=>x.id),['words','coverage','pacing','fillers','volume']);
+ assert.equal(readingReport(null,{pauses:0,quiet:false},'').score,null);
+});
+test('practice rotates indefinitely at the highest level and uses flagged words',()=>{
+ const issue={id:'words',words:['silver','bright']};
+ assert.equal(drillPrompt(issue,{level:0,attempts:0}),'silver');assert.equal(drillPrompt(issue,{level:0,attempts:1}),'bright');
+ const prompts=Array.from({length:12},(_,attempts)=>drillPrompt(issue,{level:4,attempts}));assert.ok(prompts.every(Boolean));assert.ok(new Set(prompts).size>2);
+});

@@ -8,8 +8,8 @@ export const skills = {
   pacing: { name: 'Natural pacing', subtitle: 'Find room for each thought.', icon: 'Waves', color: 'green', levels: ['Take a comfortable breath.', 'The sun was shining.', 'Sarah stepped outside. / She took a breath.', 'Pause at the slash: Six small birds / settled on a branch.', 'The sun was shining. Sarah stopped beside the stream.'], cue: 'Use the punctuation to group your words. A pause can be useful; aim for a comfortable flow.' },
   clarity: { name: 'Clear delivery', subtitle: 'Give every word a little space.', icon: 'MessageCircle', color: 'orange', levels: ['sun · stream · street', 'silver · seven · settled', 'Six small birds.', 'She listened to the soft sounds.', 'Six small birds settled beside the silver stream.'], cue: 'Use a comfortable speaking volume and finish each word. Keep the microphone distance consistent.' }
 };
-export function analyze(frames, duration) {
-  if (!frames.length || duration < 2) return { valid: false, reason: 'Record at least two seconds of speech before finishing.' };
+export function analyze(frames, duration, minimumDuration = 2) {
+  if (!frames.length || duration < minimumDuration) return { valid: false, reason: minimumDuration < 2 ? 'Record a little longer before finishing.' : 'Record at least two seconds of speech before finishing.' };
   const peak = Math.max(...frames.map(f => f.rms));
   if (peak < 0.006) return { valid: false, reason: 'No clear audio detected. Check your microphone and try again.' };
   const threshold = Math.max(0.006, peak * 0.09);

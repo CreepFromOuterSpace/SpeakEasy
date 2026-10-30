@@ -30,12 +30,18 @@ app.whenReady().then(() => {
     callback(permission === 'media' && trusted(contents.getURL()) && (details.mediaTypes || []).every(t => ['audio', 'video'].includes(t)));
   });
   session.defaultSession.setPermissionCheckHandler((contents, permission) => permission === 'media' && !!contents && trusted(contents.getURL()));
+  ipcMain.handle('speech:cancel', event => {
+    if(!trusted(event.senderFrame?.url))throw new Error('Untrusted speech request.');
+    const old=speechWorker;speechWorker=undefined;
+    if(pending){clearTimeout(pending.timer);pending.reject(new Error('Analysis cancelled.'));pending=undefined;}
+    old?.terminate();return true;
+  });
   ipcMain.handle('speech:transcribe', (event,samples) => {
     if(!trusted(event.senderFrame?.url)) throw new Error('Untrusted speech request.');
     return runSpeech(samples);
   });
   function createWindow() {
-    win = new BrowserWindow({ width: 1440, height: 980, minWidth: 1000, minHeight: 740, title: 'SpeakEasy', backgroundColor: '#f8f7f4', webPreferences: { preload: path.join(__dirname,'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true } });
+    win = new BrowserWindow({ width: 1440, height: 980, minWidth: 1000, minHeight: 740, title: 'SpeakEasy', backgroundColor: '#fbfbfd', webPreferences: { preload: path.join(__dirname,'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true } });
     win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     win.webContents.on('will-navigate', (event, url) => { if (!trusted(url)) event.preventDefault(); });
     win.loadFile(index);
