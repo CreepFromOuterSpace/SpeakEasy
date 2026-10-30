@@ -1,7 +1,44 @@
 {
-  "name": "speakwell",
-  "private": true,
+  "name": "speakeasy",
   "version": "0.1.0",
-  "scripts": { "tauri": "tauri", "dev": "tauri dev", "build": "tauri build" },
-  "devDependencies": { "@tauri-apps/cli": "^2.1.0" }
+  "private": true,
+  "type": "module",
+  "description": "Private speech practice with live mouth tracking",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "start": "npm run build && electron .",
+    "build": "vite build",
+    "models": "node scripts/setup-models.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "package": "npm run build && electron-builder --mac dir",
+    "models:speech": "node scripts/setup-speech.mjs",
+    "test:speech": "node scripts/test-speech.mjs"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.8.1",
+    "@mediapipe/tasks-vision": "latest",
+    "lucide": "latest"
+  },
+  "devDependencies": {
+    "electron": "latest",
+    "electron-builder": "latest",
+    "vite": "latest"
+  },
+  "build": {
+    "appId": "com.speakeasy.practice",
+    "productName": "SpeakEasy",
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.healthcare-fitness",
+      "extendInfo": {
+        "NSCameraUsageDescription": "Show a private mirror with live mouth landmarks during speech practice.",
+        "NSMicrophoneUsageDescription": "Record speech locally for playback and practice measurements."
+      }
+    }
+  }
 }
