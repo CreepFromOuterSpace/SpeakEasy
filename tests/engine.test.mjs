@@ -28,3 +28,20 @@ test('practice rotates indefinitely at the highest level and uses flagged words'
  assert.equal(drillPrompt(issue,{level:0,attempts:0}),'silver');assert.equal(drillPrompt(issue,{level:0,attempts:1}),'bright');
  const prompts=Array.from({length:12},(_,attempts)=>drillPrompt(issue,{level:4,attempts}));assert.ok(prompts.every(Boolean));assert.ok(new Set(prompts).size>2);
 });
+import { createEndpoint, updateEndpoint, readingPosition, resamplePCM } from '../src/reading-session.js';
+test('endpoint waits for speech, tolerates short pauses, and stops after sustained silence',()=>{
+ let s=createEndpoint();for(let i=0;i<100;i++)s=updateEndpoint(s,0,.1);assert.equal(s.stop,false);
+ for(let i=0;i<10;i++)s=updateEndpoint(s,.1,.1);assert.equal(s.started,true);
+ for(let i=0;i<15;i++)s=updateEndpoint(s,0,.1);assert.equal(s.stop,false);
+ s=updateEndpoint(s,.1,.1);assert.equal(s.silence,0);
+ for(let i=0;i<31;i++)s=updateEndpoint(s,0,.1);assert.equal(s.stop,true);
+});
+test('reading position uses recognized content, tolerates recognition differences and never moves backward',()=>{
+ const text='Sarah stepped outside into the morning sunshine. Six small birds sang.';
+ assert.equal(readingPosition(text,'Sarah stepped outside'),3);
+ assert.equal(readingPosition(text,'Sarah stepped outside into the morning sunshine'),7);
+ assert.equal(readingPosition(text,'Sarah stepped',7),7);
+ assert.equal(readingPosition(text,'unrelated noises only'),0);
+ assert.equal(readingPosition(text,text),11);
+});
+test('PCM resampling preserves duration and finite samples',()=>{const out=resamplePCM([new Float32Array(48000).fill(.25)],48000);assert.equal(out.length,16000);assert.ok(out.every(x=>x===.25));});

@@ -2,12 +2,14 @@ import './style.css';
 import { createIcons, icons } from 'lucide';
 import { FaceLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
 import { compareText, escapeHTML } from './alignment.js';
+import { readingPosition, createEndpoint, updateEndpoint, resamplePCM } from './reading-session.js';
 import { passage, analyze, advance, readingReport, drillPrompt } from './engine.js';
 const $=s=>document.querySelector(s), app=$('#app');
 const icon=(name,size=20)=>`<i data-lucide="${name}" style="width:${size}px;height:${size}px"></i>`;
 let screen='welcome',profile={age:'',gender:''},report,result,comparison,speechResult,speechError='',sample=false;
 let selectedIssue,progress={},drillFeedback,prompt='',history=[],showReading=false,showProfile=false,taskToken=0;
 let recording=false,stream,context,analyser,source,recorder,chunks=[],frames=[],startTime=0,lastFrame=0,raf,tracker,trackLoading=false,lastVideoTime=-1,lastTrack=0,recordingURL,drillURL,lastBlob,error='',cameraStatus='Camera off',currentLine=0;
+let capture,pcmChunks=[],endpoint=createEndpoint(),readPosition=0,liveText='',liveBusy=false,liveError='',liveAt=0,recordingEpoch=0,liveJob,stopReason='';
 let mediaBusy=false,analyzing=false,analysisMessage='';
 try{progress=JSON.parse(localStorage.getItem('speakeasy-learn')||'{}');history=JSON.parse(localStorage.getItem('speakeasy-history')||'[]');profile=JSON.parse(localStorage.getItem('speakeasy-profile')||'{"age":"","gender":""}');}catch{}
 const save=()=>{try{localStorage.setItem('speakeasy-learn',JSON.stringify(progress));localStorage.setItem('speakeasy-history',JSON.stringify(history.slice(-30)));localStorage.setItem('speakeasy-profile',JSON.stringify(profile));}catch{}};
@@ -15,11 +17,11 @@ window.speech?.onProgress(message=>{analysisMessage=message;const el=$('#analysi
 const busy=()=>recording||analyzing||mediaBusy;
 const cameraOn=()=>stream?.getVideoTracks().some(t=>t.readyState==='live');
 function render(){
- app.innerHTML=`<header class="app-header"><span class="brand">${icon('AudioLines',23)}SpeakEasy</span><span class="header-right">${sample&&screen!=='welcome'?'<span class="demo-tag">Sample session</span>':''}${screen!=='welcome'?`<button class="button quiet" id="profile">${icon('UserRound',18)}<span class="sr-only">Your progress</span></button>${screen==='practice'?'<button class="button quiet" id="diagnostic">'+icon('RotateCcw',15)+' New diagnostic</button>':''}`:''}<span class="privacy" title="Audio and video are processed on this device">${icon('LockKeyhole',14)} Private by design</span></span></header><main class="${screen}">${analyzing?loading():screen==='welcome'?welcome():screen==='read'?reading():practice()}</main>${showProfile?profilePanel():''}${error?`<div class="error" role="alert">${escapeHTML(error)}</div>`:''}<footer>Speech practice. Not a medical diagnosis.</footer>`;
+ app.innerHTML=`<header class="app-header"><span class="brand">${icon('AudioLines',23)}SpeakEasy</span><span class="header-right">${sample&&screen!=='welcome'?'<span class="demo-tag">Sample session</span>':''}${screen!=='welcome'?`<button class="button quiet" id="profile">${icon('UserRound',18)}<span class="sr-only">Your progress</span></button>${(screen==='practice'||screen==='results')?'<button class="button quiet" id="diagnostic">'+icon('RotateCcw',15)+' New diagnostic</button>':''}`:''}<span class="privacy" title="Audio and video are processed on this device">${icon('LockKeyhole',14)} Private by design</span></span></header><main class="${screen}">${analyzing?loading():screen==='welcome'?welcome():screen==='read'?reading():screen==='results'?diagnosticResults():practice()}</main>${showProfile?profilePanel():''}${error?`<div class="error" role="alert">${escapeHTML(error)}</div>`:''}<footer>Speech practice. Not a medical diagnosis.</footer>`;
  createIcons({icons});bind();if((screen==='read'||screen==='practice')&&cameraOn())attachVideo();
 }
 function welcome(){return `<section class="welcome-content"><div class="app-mark">${icon('AudioLines',42)}</div><h1>A little about you.</h1><p class="subtitle">Then, let’s get to know your voice.</p><form id="profile-form"><div class="fields"><label>Age<input id="age" type="number" inputmode="numeric" min="5" max="120" placeholder="Your age" value="${escapeHTML(profile.age)}" required></label><label>Gender<select id="gender" required><option value="" disabled ${!profile.gender?'selected':''}>Select</option>${['Woman','Man','Nonbinary','Self-described','Prefer not to say'].map(g=>`<option ${profile.gender===g?'selected':''}>${g}</option>`).join('')}</select></label></div><button class="button primary" type="submit">Continue ${icon('ArrowRight',18)}</button></form><p class="fine">Saved on this device. Never used to grade your speech.</p></section>`;}
-function reading(){return `<div class="section-heading"><h1>Read this aloud.</h1><p class="subtitle">Just use your everyday voice.</p></div><section class="reading-layout"><div class="reading-main"><div class="reading-passage">${passage.map(p=>`<p>${p}</p>`).join('')}</div><div class="record-controls">${recording?`<button class="button primary recording" id="finish">${icon('Square',16)} Finish reading</button><span class="record-time"><span class="live-dot"></span><span id="timer">00:00</span></span>`:`<button class="button primary" id="start">${icon('Mic',19)} Start reading</button><button class="button quiet" id="sample">Try a sample</button>`}</div><details class="limits"><summary>What this check can tell you</summary><p>Words are compared with a local speech-recognition transcript. Differences may come from recognition errors or noise. Pauses are observations, not faults. This prototype cannot diagnose lisps, stuttering, or other speech conditions.</p></details></div>${mirror()}</section>`;}
+function reading(){return `<div class="section-heading"><h1>Read this aloud.</h1><p class="subtitle">Just use your everyday voice.</p></div><section class="reading-layout"><div class="reading-main"><div class="reading-passage" id="live-passage">${readingWords()}</div><div class="reading-progress"><div class="reading-track"><span id="reading-fill" style="width:${readPosition/passage.join(' ').split(/\s+/).length*100}%"></span></div><span id="reading-count">${readPosition} / ${passage.join(' ').split(/\s+/).length} words</span></div><p class="live-status" id="live-status" aria-live="polite">${recording?'Listening. Reading progress updates as words are recognized.':'Recording finishes automatically after 3 seconds of silence.'}</p><div class="record-controls">${recording?`<button class="button primary recording" id="finish">${icon('Square',16)} Finish reading</button><span class="record-time"><span class="live-dot"></span><span id="timer">00:00</span></span>`:`<button class="button primary" id="start">${icon('Mic',19)} Start reading</button><button class="button quiet" id="sample">Try a sample</button>`}</div><details class="limits"><summary>What this check can tell you</summary><p>Words are compared with a local speech-recognition transcript. Differences may come from recognition errors or noise. Pauses are observations, not faults. This prototype cannot diagnose lisps, stuttering, or other speech conditions.</p></details></div>${mirror()}</section>`;}
 function mirror(){return `<aside class="mirror"><div class="video-wrap"><video id="video" autoplay playsinline muted></video><canvas id="overlay"></canvas><div class="camera-empty ${cameraOn()?'hidden':''}" id="camera-empty">${icon('ScanFace',46)}<button class="button glass" id="camera">${icon('Video',16)} Turn on mirror</button></div>${cameraOn()?'<button class="camera-off" id="camera-off" aria-label="Turn camera off">'+icon('VideoOff',16)+'</button>':''}<span class="mirror-label" id="tracking">${cameraStatus}</span></div><p>Live lip mirror · stays on this device</p><div class="wave-wrap"><canvas id="wave" width="300" height="40"></canvas></div></aside>`;}
 function loading(){return `<section class="loading-content" role="status"><div class="spinner"></div><h1>${screen==='practice'?'Listening closely.':'Getting to know your voice.'}</h1><p class="subtitle" id="analysis-status">${escapeHTML(analysisMessage)}</p><p class="fine">Your recording stays on this device.</p></section>`;}
 function annotatedPassage(){
@@ -47,8 +49,9 @@ async function selectIssue(id,word){
  prompt='';drillFeedback=undefined;revokeDrill();error='';screen='practice';render();
 }
 function enterPractice(){selectedIssue=report.issues[0]||{id:'words',name:'Word delivery',detail:'General practice',words:[],color:'blue'};screen='practice';prompt='';drillFeedback=undefined;showReading=false;error='';render();}
-async function restartDiagnostic(){taskToken++;if(analyzing)await window.speech?.cancel();analyzing=false;if(recording)await stopRecording(true);speechSynthesis.cancel();screen='read';sample=false;error='';showProfile=false;render();}
+async function restartDiagnostic(){taskToken++;recordingEpoch++;if(analyzing||liveBusy)await window.speech?.cancel();analyzing=false;liveBusy=false;liveJob=undefined;if(recording)await stopRecording(true);speechSynthesis.cancel();screen='read';sample=false;error='';showProfile=false;render();}
 function bind(){
+ $('#begin-practice')?.addEventListener('click',enterPractice);
  $('#focus-select')?.addEventListener('change',e=>selectIssue(e.target.value));
  $('#profile')?.addEventListener('click',()=>{showProfile=true;render();$('#close-profile')?.focus();});
  $('#close-profile')?.addEventListener('click',()=>{showProfile=false;render();$('#profile')?.focus();});
@@ -61,7 +64,7 @@ function bind(){
  $('#sample')?.addEventListener('click',()=>{
   if(busy())return;sample=true;stopCamera();
   const text=passage.join(' ').replace('silver','little').replace('bright yellow','yellow').replace('She took a breath','She um took a breath');
-  speechResult={text};comparison=compareText(passage.join(' '),text);result={duration:34.2,pauses:3,db:-24,quiet:false};report=readingReport(comparison,result,text);speechError='';enterPractice();
+  speechResult={text};comparison=compareText(passage.join(' '),text);result={duration:34.2,pauses:3,db:-24,quiet:false};report=readingReport(comparison,result,text);speechError='';screen='results';render();
  });
  document.querySelectorAll('[data-issue]').forEach(b=>b.onclick=()=>selectIssue(b.dataset.issue));
  document.querySelectorAll('[data-word]').forEach(b=>b.onclick=()=>selectIssue('words',b.dataset.word));
@@ -73,14 +76,14 @@ function bind(){
 function stopCamera(){stream?.getVideoTracks().forEach(t=>{t.stop();stream.removeTrack(t);});cameraStatus='Camera off';lipCrop=undefined;}
 function revokeDrill(){if(drillURL)URL.revokeObjectURL(drillURL);drillURL=undefined;}
 async function pcmFromBlob(blob){const ctx=new AudioContext();try{const decoded=await ctx.decodeAudioData(await blob.arrayBuffer());const offline=new OfflineAudioContext(1,Math.ceil(decoded.duration*16000),16000),node=offline.createBufferSource();node.buffer=decoded;node.connect(offline.destination);node.start();return(await offline.startRendering()).getChannelData(0);}finally{await ctx.close();}}
-async function transcribe(){if(!window.speech)throw Error('Open the Electron app for local speech analysis.');return window.speech.transcribe(await pcmFromBlob(lastBlob));}
+async function transcribe(){if(liveJob)await liveJob.catch(()=>{});if(!window.speech)throw Error('Open the Electron app for local speech analysis.');return window.speech.transcribe(await pcmFromBlob(lastBlob));}
 async function finishCheckin(){
  if(analyzing||mediaBusy||!recording)return;
  const token=++taskToken;const duration=(performance.now()-startTime)/1000;await stopRecording();result=analyze(frames,duration);
  if(!result.valid){error=result.reason;render();return;}
  sample=false;speechResult=undefined;comparison=undefined;speechError='';analyzing=true;analysisMessage='Preparing your reading…';render();
  try{const heard=await transcribe();if(token!==taskToken)return;speechResult=heard;if(!speechResult.text.trim())throw Error('No words recognized. Try again closer to the microphone.');comparison=compareText(passage.join(' '),speechResult.text);}catch(e){if(token===taskToken)speechError=e.message;}
- finally{if(token!==taskToken)return;report=readingReport(comparison,result,speechResult?.text||'');analyzing=false;history.push({date:Date.now(),score:report.score});save();enterPractice();}
+ finally{if(token!==taskToken)return;report=readingReport(comparison,result,speechResult?.text||'');analyzing=false;history.push({date:Date.now(),score:report.score});save();screen='results';render();}
 }
 async function finishDrill(){
  if(analyzing||mediaBusy||!recording)return;
@@ -115,21 +118,23 @@ async function initTracker() {
 }
 function attachVideo(){const video=$('#video');if(video&&stream?.getVideoTracks().some(t=>t.readyState==='live')){video.srcObject=stream;video.play().catch(()=>{});$('#camera-empty')?.classList.add('hidden');}else $('#camera-empty')?.classList.remove('hidden');}
 async function startRecording(drill) {
- if(mediaBusy||recording)return;mediaBusy=true;
+ if(mediaBusy||recording||analyzing)return;mediaBusy=true;
  try {
  error='';speechSynthesis.cancel();
  const mic=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true},video:false});
  if(!stream)stream=mic;else{stream.getAudioTracks().forEach(t=>{t.stop();stream.removeTrack(t);});mic.getAudioTracks().forEach(t=>stream.addTrack(t));}
  context=new AudioContext();await context.resume();source=context.createMediaStreamSource(new MediaStream(stream.getAudioTracks()));analyser=context.createAnalyser();analyser.fftSize=2048;source.connect(analyser);
- chunks=[];frames=[];recorder=new MediaRecorder(new MediaStream(stream.getAudioTracks()));recorder.ondataavailable=e=>{if(e.data.size)chunks.push(e.data);};recorder.start();startTime=performance.now();lastFrame=startTime;recording=true;currentLine=0;if(drill&&drillURL){URL.revokeObjectURL(drillURL);drillURL=undefined;}render();
- }catch(e){error=`Microphone unavailable: ${e.message}. Check microphone permissions and try again.`;render();}finally{mediaBusy=false;}
+ chunks=[];frames=[];pcmChunks=[];endpoint=createEndpoint();readPosition=0;liveText='';liveError='';liveAt=0;liveBusy=false;liveJob=undefined;recordingEpoch++;stopReason='';
+ await context.audioWorklet.addModule('./pcm-worklet.js');capture=new AudioWorkletNode(context,'speech-capture');source.connect(capture);capture.connect(context.destination);capture.port.onmessage=e=>handlePCM(e.data,drill);
+ recorder=new MediaRecorder(new MediaStream(stream.getAudioTracks()));recorder.ondataavailable=e=>{if(e.data.size)chunks.push(e.data);};recorder.start();startTime=performance.now();lastFrame=startTime;recording=true;currentLine=0;if(drill&&drillURL){URL.revokeObjectURL(drillURL);drillURL=undefined;}render();
+ }catch(e){stream?.getAudioTracks().forEach(t=>{t.stop();stream.removeTrack(t);});source?.disconnect();capture?.disconnect();await context?.close().catch(()=>{});error=`Microphone unavailable: ${e.message}. Check microphone permissions and try again.`;render();}finally{mediaBusy=false;}
 }
 async function stopRecording(drill=false){
  if(!recording)return;recording=false;mediaBusy=true;
  await new Promise(resolve=>{recorder.onstop=resolve;recorder.stop();});
  lastBlob=new Blob(chunks,{type:recorder.mimeType});const url=URL.createObjectURL(lastBlob);
  if(drill){if(drillURL)URL.revokeObjectURL(drillURL);drillURL=url;}else{if(recordingURL)URL.revokeObjectURL(recordingURL);recordingURL=url;}
- source?.disconnect();await context?.close();analyser=undefined;stream?.getAudioTracks().forEach(t=>{t.stop();stream.removeTrack(t);});mediaBusy=false;
+ source?.disconnect();capture?.disconnect();capture=undefined;await context?.close();analyser=undefined;stream?.getAudioTracks().forEach(t=>{t.stop();stream.removeTrack(t);});mediaBusy=false;
 }
 const outer=[61,146,91,181,84,17,314,405,321,375,291,409,270,269,267,0,37,39,40,185];
 const inner=[78,95,88,178,87,14,317,402,318,324,308,415,310,311,312,13,82,81,80,191];
@@ -152,7 +157,7 @@ function loop(now){
  if(recording&&now-startTime>=175000){screen==='practice'?finishDrill():finishCheckin();}
  if(recording&&analyser){
   const data=new Float32Array(analyser.fftSize);analyser.getFloatTimeDomainData(data);const rms=Math.sqrt(data.reduce((s,v)=>s+v*v,0)/data.length);
-  if(now-lastFrame>=50){frames.push({rms,dt:(now-lastFrame)/1000,time:(now-startTime)/1000});lastFrame=now;}
+
   const timer=$('#timer');if(timer){const sec=Math.floor((now-startTime)/1000);timer.textContent=`${String(Math.floor(sec/60)).padStart(2,'0')}:${String(sec%60).padStart(2,'0')}`;}
   const c=$('#wave');if(c){const ctx=c.getContext('2d');ctx.clearRect(0,0,c.width,c.height);ctx.strokeStyle='#75acf0';ctx.lineWidth=2;ctx.beginPath();for(let i=0;i<c.width;i++){const y=c.height/2+data[i*5]*c.height*2;i?ctx.lineTo(i,y):ctx.moveTo(i,y);}ctx.stroke();}
  }
@@ -163,3 +168,36 @@ function loop(now){
 window.addEventListener('beforeunload',()=>{cancelAnimationFrame(raf);stream?.getTracks().forEach(t=>t.stop());tracker?.close();context?.close();});
 document.addEventListener('keydown',e=>{if(e.key==='Tab'&&showProfile){e.preventDefault();$('#close-profile')?.focus();}if(e.key==='Escape'&&showProfile){showProfile=false;render();$('#profile')?.focus();}});
 render();raf=requestAnimationFrame(loop);
+
+function readingWords(){
+ let index=0;
+ return passage.map(p=>`<p>${p.split(/\s+/).map(word=>{const i=index++;return `<span data-reading-word="${i}" class="${i<readPosition?'spoken':i===readPosition&&recording?'current-word':''}">${escapeHTML(word)}</span>`;}).join(' ')}</p>`).join('');
+}
+function paintReadingProgress(){
+ const words=passage.join(' ').split(/\s+/);
+ document.querySelectorAll('[data-reading-word]').forEach(el=>{const i=+el.dataset.readingWord;el.classList.toggle('spoken',i<readPosition);el.classList.toggle('current-word',i===readPosition&&recording);});
+ const bar=$('#reading-fill'),count=$('#reading-count');if(bar)bar.style.width=`${readPosition/words.length*100}%`;if(count)count.textContent=`${readPosition} / ${words.length} words`;
+}
+function handlePCM(samples,drill){
+ if(!recording||!context)return;
+ pcmChunks.push(samples);
+ const dt=samples.length/context.sampleRate,rms=Math.sqrt(samples.reduce((sum,x)=>sum+x*x,0)/samples.length);
+ frames.push({rms,dt,time:(performance.now()-startTime)/1000});endpoint=updateEndpoint(endpoint,rms,dt);
+ const status=$('#live-status');
+ if(status){status.textContent=endpoint.started&&endpoint.silence>=1?`Finishing in ${Math.max(1,Math.ceil(3-endpoint.silence))}… Keep speaking to continue.`:liveError?liveError:liveBusy?'Following your reading…':endpoint.started?'Listening. Pause for 3 seconds when you’re done.':'Listening for your voice…';}
+ if(endpoint.noSpeech){stopReason='No speech detected';(async()=>{await stopRecording(drill);error='No speech detected. Check your microphone, then try again.';render();})();return;}
+ if(endpoint.stop){stopReason='Finished after 3 seconds of silence';drill?finishDrill():finishCheckin();return;}
+ if(!drill&&endpoint.started&&endpoint.voice>=.8&&!liveBusy&&endpoint.elapsed-liveAt>=3&&window.speech){
+  const epoch=recordingEpoch;
+  const audio=resamplePCM(pcmChunks,context.sampleRate);if(audio.length<16000)return;
+  liveAt=endpoint.elapsed;liveBusy=true;
+  liveJob=window.speech.transcribe(audio).then(heard=>{
+   if(epoch!==recordingEpoch||screen!=='read'||!recording)return;
+   liveText=heard.text||'';readPosition=readingPosition(passage.join(' '),liveText,readPosition);paintReadingProgress();
+  }).catch(()=>{if(epoch===recordingEpoch)liveError='Live word tracking unavailable. Your recording will still be analyzed when you finish.';}).finally(()=>{if(epoch===recordingEpoch)liveBusy=false;});
+ }
+}
+function diagnosticResults(){
+ const issues=report.issues;
+ return `<section class="diagnostic-result"><div class="diagnostic-score"><span class="eyebrow">YOUR DIAGNOSTIC${sample?' · SAMPLE':''}</span><h1>${report.score??'—'}<small>${report.score===null?'':'/100'}</small></h1><p class="subtitle">${report.score===null?'Speech analysis unavailable':'Script match'}</p><p class="fine">${sample?'Illustrative sample results.':stopReason||'Recording complete.'} ${comparison?`${comparison.matches} of ${comparison.expected} words matched.`:''}</p></div><div class="diagnostic-review"><div><div class="result-passage">${annotatedPassage()}</div><div class="legend"><span><i class="blue-dot"></i>Heard differently</span><span><i class="orange-dot"></i>Not heard</span><span><i class="green-dot"></i>Added</span></div>${!sample&&recordingURL?`<audio controls src="${recordingURL}"></audio>`:''}<details class="transcript"><summary>Transcript & score</summary><p>${escapeHTML(speechResult?.text||'No transcript available.')}</p><p class="fine">100 × (1 − word error rate), bounded at zero. This measures transcript agreement, not pronunciation accuracy. Recognition errors can cause flags.</p></details>${speechError?`<p class="inline-error">${escapeHTML(speechError)}</p>`:''}</div><aside><h2>What to work on</h2>${issues.length?issues.map(i=>`<button class="diagnostic-issue" data-issue="${i.id}"><strong>${i.name}</strong><small>${escapeHTML(i.detail)}</small>${icon('ArrowUpRight',16)}</button>`).join(''):'<p class="muted">No selected issues found. Keep building consistency with general practice.</p>'}<button class="button primary" id="begin-practice">Start practice ${icon('ArrowRight',18)}</button><p class="fine">${result.pauses} pauses observed · ${result.db} dBFS<br>Speech practice, not a diagnosis.</p></aside></div></section>`;
+}
